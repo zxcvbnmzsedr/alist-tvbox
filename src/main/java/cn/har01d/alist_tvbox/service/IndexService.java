@@ -67,6 +67,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -80,6 +81,11 @@ import static cn.har01d.alist_tvbox.util.Constants.USER_AGENT;
 @Slf4j
 @Service
 public class IndexService {
+    private static final Pattern SEASON1 = Pattern.compile("Season ?\\d{1,2}.*");
+    private static final Pattern SEASON2 = Pattern.compile("SE\\d{1,2}.*");
+    private static final Pattern SEASON3 = Pattern.compile("^[Ss](\\d{1,2})$");
+    private static final Pattern SEASON4 = Pattern.compile("第.{1,3}季.*");
+
     private final AListService aListService;
     private final SiteService siteService;
     private final TaskService taskService;
@@ -182,7 +188,7 @@ public class IndexService {
             }
             return remote;
         } catch (Exception e) {
-            log.warn("", e);
+            log.debug("", e);
         }
         return "";
     }
@@ -395,9 +401,11 @@ public class IndexService {
         indexRequest.setPaths(indexRequest.getPaths().stream().filter(e -> !e.isBlank()).toList());
         List<String> paths = indexRequest.getPaths().stream().map(e -> e.split(":")[0]).collect(Collectors.toList());
         List<String> excludes = paths.stream().filter(e -> e.startsWith("-")).map(e -> e.substring(1)).toList();
-        paths.removeAll(excludes);
+        List<String> reset = paths.stream().filter(e -> e.startsWith(">")).map(e -> e.substring(1)).toList();
+        paths.removeIf(e -> excludes.contains("-" + e));
+        paths.removeIf(e -> reset.contains(">" + e));
         if (indexRequest.isIncremental()) {
-            removeLines(file, paths);
+            removeLines(file, paths, reset);
         }
 
         String summary;
@@ -414,6 +422,9 @@ public class IndexService {
             for (String path : indexRequest.getPaths()) {
                 if (isCancelled(context)) {
                     break;
+                }
+                if (path.startsWith(">") || path.startsWith("-")) {
+                    continue;
                 }
                 context.getTime().clear();
                 path = customize(context, indexRequest, path);
@@ -499,11 +510,12 @@ public class IndexService {
         return task.getStatus() == TaskStatus.COMPLETED && task.getResult() == TaskResult.CANCELLED;
     }
 
-    private void removeLines(File file, List<String> prefix) {
+    private void removeLines(File file, List<String> prefix, List<String> reset) {
         if (!file.exists()) {
             return;
         }
 
+        prefix.addAll(reset);
         try {
             List<String> lines = Files.readAllLines(file.toPath())
                     .stream()
@@ -656,7 +668,7 @@ public class IndexService {
                         }
                     } else if (isMediaFormat(fsInfo.getName())) { // file
                         hasFile = true;
-                        if (context.isIncludeFiles()) {
+                        if (context.isIncludeFiles() || path.contains("电影")) {
                             String newPath = fixPath(path + "/" + fsInfo.getName());
                             if (exclude(context.getExcludes(), newPath)) {
                                 log.warn("exclude file {}", newPath);
@@ -732,6 +744,9 @@ public class IndexService {
                     if (fsInfo.getName().equals("字幕")) {
                         continue;
                     }
+                    if (isSeason(fsInfo.getName())) {
+                        hasFile = true;
+                    }
                     String newPath = fixPath(path + "/" + fsInfo.getName());
                     log.debug("new path: {}", newPath);
                     if (exclude(context.getExcludes(), newPath)) {
@@ -795,12 +810,23 @@ public class IndexService {
         taskService.updateTaskSummary(context.getTaskId(), context.stats.toString());
     }
 
+    private static boolean isSeason(String name) {
+        return SEASON1.matcher(name).matches()
+                || SEASON2.matcher(name).matches()
+                || SEASON3.matcher(name).matches()
+                || SEASON4.matcher(name).matches()
+                ;
+    }
+
     private boolean exclude(Set<String> rules, String path) {
         for (String rule : rules) {
             if (StringUtils.isBlank(rule)) {
                 continue;
             }
             if (rule.startsWith("/") && path.startsWith(rule)) {
+                return true;
+            }
+            if (rule.startsWith("~") && path.matches(rule.substring(1))) {
                 return true;
             }
             if (rule.startsWith("^") && rule.endsWith("$") && path.equals(rule.substring(1, rule.length() - 1))) {
